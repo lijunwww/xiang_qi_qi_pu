@@ -67,6 +67,7 @@ class VariationManager:
 APP_STATE_DIR = os.path.join(os.path.expanduser("~"), ".xiangqi_app")
 RECENT_JSON = os.path.join(APP_STATE_DIR, "recent_games.json")
 BOOKMARK_JSON = os.path.join(APP_STATE_DIR, "bookmarks.json")
+SETTINGS_JSON = os.path.join(APP_STATE_DIR, "settings.json")
 
 
 def ensure_state_dir():
@@ -132,6 +133,15 @@ def create_menubar(gui):
     edit_menu.add_command(label="左右交换(M)", command=gui.flip_left_right)
     edit_menu.add_command(label="红黑对调(A)", command=gui.swap_red_black)
     menubar.add_cascade(label="编辑(E)", menu=edit_menu)
+
+    # ================= 视图 / View =================
+    view_menu = tk.Menu(menubar, tearoff=False)
+    view_menu.add_checkbutton(label="显示棋盘", variable=gui.board_visible, command=gui.toggle_board_visibility)
+    view_menu.add_separator()
+    view_menu.add_checkbutton(label="显示棋谱属性", variable=gui.attr_visible, command=gui.toggle_attr_visibility)
+    view_menu.add_checkbutton(label="显示注释", variable=gui.notes_visible, command=gui.toggle_notes_visibility)
+    view_menu.add_checkbutton(label="显示变着列表", variable=gui.vari_visible, command=gui.toggle_variations_visibility)
+    menubar.add_cascade(label="视图(V)", menu=view_menu)
 
     # ================= 书签 =================
     bm_menu = tk.Menu(menubar, tearoff=False)
@@ -703,6 +713,56 @@ class FileOps:
         except Exception as e:
             messagebox.showerror('加载失败', str(e), parent=self.gui.root)
 
+    def edit_properties(self):
+        """Open a simple dialog to edit metadata (title, author, remark)."""
+        dlg = tk.Toplevel(self.gui.root)
+        dlg.title("编辑棋谱属性")
+        dlg.transient(self.gui.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text="标题：").grid(row=0, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(dlg, text="作者：").grid(row=1, column=0, sticky="e", padx=6, pady=4)
+        ttk.Label(dlg, text="说明：").grid(row=2, column=0, sticky="ne", padx=6, pady=4)
+
+        var_title = tk.StringVar(value=self.gui.metadata.get("title", ""))
+        var_author = tk.StringVar(value=self.gui.metadata.get("author", ""))
+        ent_title = ttk.Entry(dlg, textvariable=var_title, width=48)
+        ent_author = ttk.Entry(dlg, textvariable=var_author, width=48)
+        ent_title.grid(row=0, column=1, sticky="we", padx=6, pady=4)
+        ent_author.grid(row=1, column=1, sticky="we", padx=6, pady=4)
+
+        txt_remark = tk.Text(dlg, width=48, height=6)
+        txt_remark.insert("1.0", self.gui.metadata.get("remark", ""))
+        txt_remark.grid(row=2, column=1, sticky="we", padx=6, pady=4)
+
+        def on_save():
+            self.gui.metadata["title"] = var_title.get().strip()
+            self.gui.metadata["author"] = var_author.get().strip()
+            self.gui.metadata["remark"] = txt_remark.get("1.0", "end").strip()
+            # update main UI fields if present
+            try:
+                self.gui.var_title.set(self.gui.metadata["title"])
+                self.gui.var_author.set(self.gui.metadata["author"])
+                self.gui.txt_remark.delete("1.0", "end")
+                self.gui.txt_remark.insert("1.0", self.gui.metadata["remark"])
+                self.gui.root.title(f"象棋摆谱器 - {self.gui.metadata.get('title') or '未命名'}")
+            except Exception:
+                pass
+            self.gui.mark_dirty()
+            dlg.destroy()
+
+        def on_cancel():
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=3, column=1, sticky="e", pady=(2,8), padx=6)
+        ttk.Button(btns, text="保存", command=on_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="取消", command=on_cancel).pack(side=tk.RIGHT, padx=4)
+
+        dlg.columnconfigure(1, weight=1)
+        ent_title.focus_set()
+        self.gui.root.wait_window(dlg)
+
 
 # ======================= bookmark_ops.py =======================
 class BookmarkOps:
@@ -825,7 +885,16 @@ class XiangqiGUI:
         # —— 基本窗口 ——
         self.root = root
         self.root.title("象棋摆谱器")
-        self.root.minsize(980, 640)
+        # allow resizing by mouse drag
+        try:
+            self.root.resizable(True, True)
+        except Exception:
+            pass
+        # set a reasonable minimum size so users can resize freely
+        try:
+            self.root.minsize(300, 200)
+        except Exception:
+            pass
 
         # 未保存标志 + 退出拦截
         self._dirty = False
@@ -863,42 +932,100 @@ class XiangqiGUI:
         self.transforms = Transforms(self)
 
         # ===== 布局：左棋盘 + 右综合面板 =====
-        root_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        root_paned.pack(fill=tk.BOTH, expand=True)
+        self.root_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        self.root_paned.pack(fill=tk.BOTH, expand=True)
 
         # 左：棋盘
-        self.board_canvas = BoardCanvas(self, root_paned)
-        root_paned.add(self.board_canvas.frame, weight=3)
+        self.board_canvas = BoardCanvas(self, self.root_paned)
+        self.root_paned.add(self.board_canvas.frame, weight=3)
 
         # 右：上属性 + 下（左主线棋谱 | 右：上注释 + 下变着）
-        right_paned = ttk.PanedWindow(root_paned, orient=tk.VERTICAL)
-        root_paned.add(right_paned, weight=2)
+        self.right_paned = ttk.PanedWindow(self.root_paned, orient=tk.VERTICAL)
+        self.root_paned.add(self.right_paned, weight=2)
 
         # 右-上：属性
-        self.attr_frame = self._build_attr_frame(right_paned)
-        right_paned.add(self.attr_frame, weight=1)
+        self.attr_frame = self._build_attr_frame(self.right_paned)
+        self.right_paned.add(self.attr_frame, weight=1)
 
         # 右-下：左右分栏
-        lower_paned = ttk.PanedWindow(right_paned, orient=tk.HORIZONTAL)
-        right_paned.add(lower_paned, weight=3)
+        self.lower_paned = ttk.PanedWindow(self.right_paned, orient=tk.HORIZONTAL)
+        self.right_paned.add(self.lower_paned, weight=3)
 
         # 左下：主线棋谱
-        self.moves_panel = MovesPanel(self, lower_paned)
-        lower_paned.add(self.moves_panel.frame, weight=1)
+        self.moves_panel = MovesPanel(self, self.lower_paned)
+        self.lower_paned.add(self.moves_panel.frame, weight=1)
 
         # 右下：垂直分栏（上=注释 下=变着列表）
-        right_bottom = ttk.PanedWindow(lower_paned, orient=tk.VERTICAL)
-        lower_paned.add(right_bottom, weight=1)
+        self.right_bottom = ttk.PanedWindow(self.lower_paned, orient=tk.VERTICAL)
+        self.lower_paned.add(self.right_bottom, weight=1)
 
-        self.notes_frame = self._build_notes_frame(right_bottom)
-        right_bottom.add(self.notes_frame, weight=3)
+        self.notes_frame = self._build_notes_frame(self.right_bottom)
+        self.right_bottom.add(self.notes_frame, weight=3)
 
-        self.vari_panel = VariationPanel(self, right_bottom)
-        right_bottom.add(self.vari_panel.frame, weight=2)
+        self.vari_panel = VariationPanel(self, self.right_bottom)
+        self.right_bottom.add(self.vari_panel.frame, weight=2)
 
         # 菜单栏
         self.recent_submenu = None
+        # Load saved settings (persisted across runs)
+        _settings = read_json(SETTINGS_JSON, {})
+        # restore window geometry if present
+        try:
+            geom = _settings.get('geometry')
+            if geom:
+                try:
+                    self.root.geometry(geom)
+                    # ensure geometry takes effect before user interaction
+                    try:
+                        self.root.update()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Load saved visibility settings
+        self.board_visible = tk.BooleanVar(value=_settings.get('board_visible', True))
+        self.attr_visible = tk.BooleanVar(value=_settings.get('attr_visible', True))
+        self.notes_visible = tk.BooleanVar(value=_settings.get('notes_visible', True))
+        self.vari_visible = tk.BooleanVar(value=_settings.get('vari_visible', True))
         self.root.config(menu=create_menubar(self))
+
+        # Apply saved visibility settings: hide panes whose flags are False
+        try:
+            if not self.board_visible.get():
+                try: self.root_paned.forget(self.board_canvas.frame)
+                except Exception: pass
+            if not self.attr_visible.get():
+                try: self.right_paned.forget(self.attr_frame)
+                except Exception: pass
+            # If notes/vari both hidden, remove the right_bottom container so moves panel can expand
+            if not self.notes_visible.get():
+                try: self.right_bottom.forget(self.notes_frame)
+                except Exception: pass
+            if not self.vari_visible.get():
+                try: self.right_bottom.forget(self.vari_panel.frame)
+                except Exception: pass
+            if (not self.notes_visible.get()) and (not self.vari_visible.get()):
+                try:
+                    self.lower_paned.forget(self.right_bottom)
+                except Exception:
+                    pass
+            else:
+                # ensure right_bottom is present if any child is visible
+                try:
+                    if str(self.right_bottom) not in self.lower_paned.panes():
+                        self.lower_paned.add(self.right_bottom, weight=1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Adjust layout so moves panel expands if it's the only right-side subwindow
+        try:
+            self._adjust_right_layout()
+        except Exception:
+            pass
 
         # 初次绘制
         self.board_canvas.draw_board()
@@ -1353,7 +1480,218 @@ class XiangqiGUI:
                 return
             if ans:
                 self.save_quick()
+        # persist current UI visibility settings and window geometry
+        try:
+            # merge into existing settings so we don't lose other keys
+            _s = read_json(SETTINGS_JSON, {})
+            _s.update({
+                'board_visible': bool(self.board_visible.get()),
+                'attr_visible': bool(self.attr_visible.get()),
+                'notes_visible': bool(self.notes_visible.get()),
+                'vari_visible': bool(self.vari_visible.get()),
+            })
+            try:
+                self.root.update_idletasks()
+                _s['geometry'] = self.root.geometry()
+            except Exception:
+                pass
+            write_json(SETTINGS_JSON, _s)
+        except Exception:
+            pass
         self.root.destroy()
+
+    def toggle_board_visibility(self):
+        """Show or hide the left board pane (game picture)."""
+        try:
+            vis = bool(self.board_visible.get())
+        except Exception:
+            return
+        try:
+            if not vis:
+                try:
+                    self.root_paned.forget(self.board_canvas.frame)
+                except Exception:
+                    # best-effort: try to hide canvas inside frame
+                    try:
+                        self.board_canvas.canvas.pack_forget()
+                    except Exception:
+                        pass
+            else:
+                # try to insert at left (index 0) if supported, else add
+                try:
+                    self.root_paned.insert(0, self.board_canvas.frame, weight=3)
+                except Exception:
+                    try:
+                        self.root_paned.add(self.board_canvas.frame, weight=3)
+                    except Exception:
+                        # fallback: re-pack canvas
+                        try:
+                            self.board_canvas.canvas.pack(fill=tk.BOTH, expand=True)
+                        except Exception:
+                            pass
+            # refresh layout/draw
+            try:
+                self.board_canvas.draw_board()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        try:
+            self._adjust_right_layout()
+        except Exception:
+            pass
+
+    def toggle_attr_visibility(self):
+        """Show or hide the top-right attribute panel (棋谱属性)."""
+        try:
+            vis = bool(self.attr_visible.get())
+        except Exception:
+            return
+        try:
+            if not vis:
+                try:
+                    self.right_paned.forget(self.attr_frame)
+                except Exception:
+                    try:
+                        self.attr_frame.pack_forget()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self.right_paned.insert(0, self.attr_frame, weight=1)
+                except Exception:
+                    try:
+                        self.right_paned.add(self.attr_frame, weight=1)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self._adjust_right_layout()
+        except Exception:
+            pass
+
+    def toggle_notes_visibility(self):
+        """Show or hide the notes panel (注释) in the right-bottom area."""
+        try:
+            vis = bool(self.notes_visible.get())
+        except Exception:
+            return
+        try:
+            if not vis:
+                try:
+                    self.right_bottom.forget(self.notes_frame)
+                except Exception:
+                    try:
+                        self.notes_frame.pack_forget()
+                    except Exception:
+                        pass
+                # if both hidden, remove the right_bottom container from lower_paned
+                try:
+                    if (not self.vari_visible.get()):
+                        if str(self.right_bottom) in self.lower_paned.panes():
+                            self.lower_paned.forget(self.right_bottom)
+                except Exception:
+                    pass
+            else:
+                # Ensure right_bottom present
+                try:
+                    if str(self.right_bottom) not in self.lower_paned.panes():
+                        self.lower_paned.add(self.right_bottom, weight=1)
+                except Exception:
+                    pass
+                try:
+                    if str(self.notes_frame) not in self.right_bottom.panes():
+                        self.right_bottom.insert(0, self.notes_frame, weight=3)
+                except Exception:
+                    try:
+                        self.right_bottom.add(self.notes_frame, weight=3)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self._adjust_right_layout()
+        except Exception:
+            pass
+
+    def toggle_variations_visibility(self):
+        """Show or hide the variations panel (变着列表) in the right-bottom area."""
+        try:
+            vis = bool(self.vari_visible.get())
+        except Exception:
+            return
+        try:
+            if not vis:
+                try:
+                    self.right_bottom.forget(self.vari_panel.frame)
+                except Exception:
+                    try:
+                        self.vari_panel.frame.pack_forget()
+                    except Exception:
+                        pass
+                try:
+                    if (not self.notes_visible.get()):
+                        if str(self.right_bottom) in self.lower_paned.panes():
+                            self.lower_paned.forget(self.right_bottom)
+                except Exception:
+                    pass
+            else:
+                try:
+                    if str(self.right_bottom) not in self.lower_paned.panes():
+                        self.lower_paned.add(self.right_bottom, weight=1)
+                except Exception:
+                    pass
+                try:
+                    if str(self.vari_panel.frame) not in self.right_bottom.panes():
+                        self.right_bottom.add(self.vari_panel.frame, weight=2)
+                except Exception:
+                    try:
+                        self.right_bottom.insert(1, self.vari_panel.frame, weight=2)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            self._adjust_right_layout()
+        except Exception:
+            pass
+
+    def _adjust_right_layout(self):
+        """Adjust right-side pane weights so that when only the moves panel remains
+        it expands to occupy the available space.
+        """
+        try:
+            attr_vis = bool(self.attr_visible.get())
+            notes_vis = bool(self.notes_visible.get())
+            vari_vis = bool(self.vari_visible.get())
+
+            # If no top attr and no notes/vari, make lower_paned occupy full right area
+            if (not attr_vis) and (not notes_vis) and (not vari_vis):
+                try:
+                    self.right_paned.paneconfigure(self.lower_paned, weight=1)
+                except Exception:
+                    pass
+                try:
+                    self.lower_paned.paneconfigure(self.moves_panel.frame, weight=1)
+                except Exception:
+                    pass
+            else:
+                # Restore default weights
+                try:
+                    self.right_paned.paneconfigure(self.attr_frame, weight=1)
+                except Exception:
+                    pass
+                try:
+                    self.right_paned.paneconfigure(self.lower_paned, weight=3)
+                except Exception:
+                    pass
+                try:
+                    self.lower_paned.paneconfigure(self.moves_panel.frame, weight=1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 # ========== 方便外部导入 ==========
