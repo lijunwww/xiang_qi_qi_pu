@@ -320,6 +320,9 @@ class MovesPanel:
         self.listbox.bind("<<ListboxSelect>>", self._jump)
         self.listbox.bind("<Return>", self._jump)
         self.listbox.bind("<Double-Button-1>", self._jump)
+        # Ensure Up/Down are handled by GUI navigation (avoid listbox changing selection first)
+        self.listbox.bind("<Down>", lambda e: self.gui.on_key_down(e))
+        self.listbox.bind("<Up>", lambda e: self.gui.on_key_up(e))
 
     def refresh(self):
         self.listbox.delete(0, tk.END)
@@ -907,6 +910,9 @@ class XiangqiGUI:
         # 快捷键
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-y>", lambda e: self.redo())
+        self.root.bind("<Down>", self.on_key_down)
+        self.root.bind("<Up>", self.on_key_up)
+        self.root.bind("<Home>", self.on_key_home)
 
     # =================== 展示层：主线 ===================
     def get_display_moves(self):
@@ -1087,6 +1093,76 @@ class XiangqiGUI:
             self.moves_panel.select_ply(ply)
         except Exception:
             pass
+
+    def _should_ignore_nav(self):
+        w = self.root.focus_get()
+        if w is None:
+            return False
+        try:
+            # Allow navigation keys in Listbox (we handle them manually to avoid full replay bugs)
+            # Only ignore for actual text editors
+            return w.winfo_class() in ('Text', 'Entry', 'TEntry')
+        except Exception:
+            return False
+
+    def on_key_down(self, event=None):
+        if self._should_ignore_nav():
+            return
+        flat = self._mainline_san_flat()
+        max_ply = len(flat)
+        # Keep current synced with actual board history length when possible
+        current = self._current_selected_ply if self._current_selected_ply is not None else len(self.board.history)
+
+        if current < max_ply:
+            # Incremental forward: play the next move on the current board
+            next_move_san = flat[current]
+            try:
+                self.play_san(next_move_san)
+                # Sync selected ply to actual board history
+                self._current_selected_ply = len(self.board.history)
+                self._building_var = None  # Stop recording variation when navigating
+                
+                # Refresh UI
+                self.board_canvas.draw_board()
+                self.set_selection(None)
+                self._select_moves_row_for_ply(self._current_selected_ply)
+                self.refresh_variations_box()
+                self._refresh_note_editor()
+            except Exception:
+                # If move fails to play, stay at current state
+                pass
+        return "break"
+
+    def on_key_up(self, event=None):
+        if self._should_ignore_nav():
+            return
+        # If no selection, initialize from actual board history
+        if self._current_selected_ply is None:
+            self._current_selected_ply = len(self.board.history)
+
+        if self._current_selected_ply <= 0:
+            return "break"
+
+        # Incremental backward: undo the last move (if any on board)
+        if self.board.history:
+            self.board.undo_move()
+            # Sync selected ply to actual board history
+            self._current_selected_ply = len(self.board.history)
+            self._building_var = None
+            
+            # Refresh UI
+            self.board_canvas.draw_board()
+            self.set_selection(None)
+            self._select_moves_row_for_ply(self._current_selected_ply)
+            self.refresh_variations_box()
+            self._refresh_note_editor()
+        return "break"
+
+    def on_key_home(self, event=None):
+        if self._should_ignore_nav():
+            return
+        self.restore_to_ply(0)
+        return "break"
 
     # =================== 变着核心 ===================
     def _mainline_san_flat(self) -> List[str]:
