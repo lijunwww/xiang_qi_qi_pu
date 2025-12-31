@@ -70,5 +70,22 @@ def test():
     # Test Ply 3
     gui.restore_to_ply(3)
 
+
+def test_append_move_mainline():
+    print("--- test_append_move_mainline ---")
+    gui = MockGUI()
+    # Red makes a move
+    gui.play_san("炮二平五")
+    # After the move, history[-1][2] should be 'r' and moves_list should record red in first column
+    # Simulate GUI append behavior using the real method from XiangqiGUI is cumbersome here, but we test the board history inference
+    assert gui.board.history[-1][2] == 'r', "Expected last moved side to be 'r'"
+
+    # Now black moves
+    gui.play_san("炮8平5")
+    assert gui.board.history[-1][2] == 'b', "Expected last moved side to be 'b'"
+
+    print("test_append_move_mainline passed")
+
 if __name__ == "__main__":
     test()
+    test_append_move_mainline()

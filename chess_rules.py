@@ -518,10 +518,12 @@ class Board:
             print("局势：", res)
 
     def move_to_chinese(self, move: Move) -> str:
-        # —— 关键：先看 to_sq（兼容“先走后记”），取不到再看 from_sq（兼容“先记后走”）
-        piece = self.piece_at(move.to_sq)
+        # —— 关键：优先看 from_sq（移动方的棋子），如无则退而求其次看 to_sq。
+        # 之前先看 to_sq 会在“先记后走”（先生成 SAN 再执行走子）的场景中误把被吃掉的子
+        # 识别为移动方，导致符号（'兵' vs '卒'、'车' vs '車' 等）错误。优先使用 from_sq 可避免该问题。
+        piece = self.piece_at(move.from_sq)
         if piece is None:
-            piece = self.piece_at(move.from_sq)
+            piece = self.piece_at(move.to_sq)
         if piece is None:
             # 兜底：仍然给坐标，避免异常
             return f"{move.from_sq}->{move.to_sq}"

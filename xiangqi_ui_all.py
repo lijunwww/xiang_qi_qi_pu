@@ -1118,10 +1118,23 @@ class XiangqiGUI:
         return self.board.move_to_chinese(move)
 
     def append_move_mainline(self, san):
-        """主线追加（红黑交替；以 board.side_to_move 的下一手来判断）"""
-        if self.board.side_to_move == 'b':
-            self.moves_list.append([san, ""])
+        """主线追加（根据最近一手的颜色记录走子，避免依赖可能被其他操作修改的 `side_to_move`）。"""
+        # 参考：history 中每个三元组为 (move, captured, prev_side)
+        moved_side = None
+        if self.board.history:
+            moved_side = self.board.history[-1][2]
         else:
+            # 回退兼容：若 history 为空，则根据当前 side_to_move 推断上一步颜色
+            moved_side = 'r' if self.board.side_to_move == 'b' else 'b'
+
+        if moved_side == 'r':
+            # 红方刚走：新增一行的红走
+            if self.moves_list and self.moves_list[-1][0] == "":
+                self.moves_list[-1][0] = san
+            else:
+                self.moves_list.append([san, ""])
+        else:
+            # 黑方刚走：填充本行的黑走
             if self.moves_list:
                 self.moves_list[-1][1] = san
             else:
