@@ -21,46 +21,192 @@ import draw_board as db
 
 # ======================= 变着数据结构 =======================
 @dataclass
-class Variation:
-    """某一步（pivot_ply，从1开始）的一个变着序列（中文记谱SAN列表）"""
+class VariationNode:
+    """变着节点：包含本条变着的走法和其内部的多层子变着。
+    - `san_moves`: 本变着的走法序列（中文记谱SAN列表）
+    - `children`: { pivot_index(int, 1-based within this node) : List[VariationNode] }
+    """
     var_id: int
     name: str
     san_moves: List[str]
+    san_comments: List[str] = field(default_factory=list)
+    children: Dict[int, List['VariationNode']] = field(default_factory=dict)
 
 @dataclass
 class VariationManager:
     """
-    变着管理：{ pivot_ply(int) : List[Variation] }
-    - pivot_ply = 被替换的那“一步”的编号（从1开始计半步：红1=1，黑1=2，红2=3，……）
-    - 主线不存树；应用变着 = 主线[:pivot-1] + var.san_moves
+    支持多层变着的管理器。
+    - 顶层结构为 { pivot_ply(int) : List[VariationNode] }
+    - 每个 VariationNode 可在其内部任意位置挂子变着（通过 children 字段），形成树结构
+    - 提供序列化/反序列化以支持 JSON 保存/读取
     """
-    variations: Dict[int, List[Variation]] = field(default_factory=dict)
+    variations: Dict[int, List[VariationNode]] = field(default_factory=dict)
     _next_var_id: int = 1
+    _id_map: Dict[int, VariationNode] = field(default_factory=dict)
 
-    def add(self, pivot_ply: int, san_seq: List[str], name: Optional[str] = None) -> int:
-        if pivot_ply not in self.variations:
-            self.variations[pivot_ply] = []
-        var_id = self._next_var_id
-        self._next_var_id += 1
-        if not name:
-            name = san_seq[0] if san_seq else f"变着{var_id}"
-        self.variations[pivot_ply].append(Variation(var_id, name, list(san_seq)))
-        return var_id
+    def _register(self, node: VariationNode, parent_id: Optional[int] = None):
+        self._id_map[node.var_id] = node
 
-    def list(self, pivot_ply: int) -> List[Variation]:
-        return self.variations.get(pivot_ply, [])
+    def _find_parent_path(self, target_id: int) -> Optional[Tuple[int, List[int]]]:
+        """Find the path to a node by id.
+        Returns (pivot_ply, [idx_top, idx_level2, ...]) where indices are 1-based sibling orders.
+        """
+        def _search_in_node(node: VariationNode, path: List[int]) -> Optional[List[int]]:
+            for pivot_key, lst in node.children.items():
+                for j, child in enumerate(lst, start=1):
+                    if child.var_id == target_id:
+                        return path + [j]
+                    sub = _search_in_node(child, path + [j])
+                    if sub:
+                        return sub
+            return None
 
-    def get(self, pivot_ply: int, var_id: int) -> Optional[Variation]:
-        for v in self.variations.get(pivot_ply, []):
-            if v.var_id == var_id:
-                return v
+        for p, lst in self.variations.items():
+            for i, node in enumerate(lst, start=1):
+                if node.var_id == target_id:
+                    return (p, [i])
+                sub = _search_in_node(node, [i])
+                if sub:
+                    return (p, sub)
         return None
 
+    def add(self, pivot_ply: int, san_seq: List[str], name: Optional[str] = None,
+            parent_id: Optional[int] = None, pivot_index: Optional[int] = None) -> int:
+        """Add a variation.
+        - If parent_id is None: add as a top-level variation at `pivot_ply`.
+        - Else: add as a child of variation `parent_id` at position `pivot_index` (1-based index within parent's moves).
+        Returns new var_id.
+        """
+        var_id = self._next_var_id
+        self._next_var_id += 1
+        # compute hierarchical name if not provided
+        if not name:
+            if parent_id is None:
+                lst = self.variations.get(pivot_ply, [])
+                idx = len(lst) + 1
+                name = f"{pivot_ply}-{idx:02d}"
+            else:
+                # try to locate parent's path to compute prefix
+                path_info = self._find_parent_path(parent_id)
+                if path_info is None:
+                    # fallback to simple name
+                    name = san_seq[0] if san_seq else f"{pivot_ply}-01"
+                else:
+                    top_ply, indices = path_info
+                    # determine new child index among siblings under given pivot_index
+                    parent = self._id_map.get(parent_id)
+                    sibs = []
+                    if parent is not None and pivot_index is not None:
+                        sibs = parent.children.get(pivot_index, [])
+                    child_idx = len(sibs) + 1
+                    full_indices = indices + [child_idx]
+                    name = f"{pivot_ply}-" + "-".join(f"{x:02d}" for x in full_indices)
+        node = VariationNode(var_id, name, list(san_seq))
+        # initialize comments list aligned with moves
+        node.san_comments = ["" for _ in node.san_moves]
+
+        if parent_id is None:
+            if pivot_ply not in self.variations:
+                self.variations[pivot_ply] = []
+            self.variations[pivot_ply].append(node)
+        else:
+            parent = self._id_map.get(parent_id)
+            if parent is None or pivot_index is None:
+                # fallback to top-level if parent not found
+                if pivot_ply not in self.variations:
+                    self.variations[pivot_ply] = []
+                self.variations[pivot_ply].append(node)
+            else:
+                parent.children.setdefault(pivot_index, []).append(node)
+
+        self._register(node, parent_id)
+        return var_id
+
+    # ---- 根据 pivot_ply 查询顶层变着 ----
+    def list(self, pivot_ply: int) -> List[VariationNode]:
+        return self.variations.get(pivot_ply, [])
+
+    # ---- 全局按 id 查找节点 ----
+    def find_by_id(self, var_id: int) -> Optional[VariationNode]:
+        return self._id_map.get(var_id)
+
+    # 保持兼容旧接口：接受 (pivot_ply, var_id)
+    def get(self, pivot_ply: int, var_id: int) -> Optional[VariationNode]:
+        return self.find_by_id(var_id)
+
+    # --- 删除（支持顶层与任意层） ----
     def remove(self, pivot_ply: int, var_id: int) -> bool:
-        vs = self.variations.get(pivot_ply, [])
-        before = len(vs)
-        self.variations[pivot_ply] = [v for v in vs if v.var_id != var_id]
-        return len(self.variations[pivot_ply]) != before
+        node = self._id_map.get(var_id)
+        if node is None:
+            return False
+
+        # Try remove from top-level
+        for p, lst in list(self.variations.items()):
+            before = len(lst)
+            self.variations[p] = [v for v in lst if v.var_id != var_id]
+            if len(self.variations[p]) != before:
+                self._id_map.pop(var_id, None)
+                return True
+
+        # Otherwise search recursively in children
+        def _remove_in_children(children_dict: Dict[int, List[VariationNode]]) -> bool:
+            for key, lst in list(children_dict.items()):
+                before = len(lst)
+                children_dict[key] = [v for v in lst if v.var_id != var_id]
+                if len(children_dict[key]) != before:
+                    self._id_map.pop(var_id, None)
+                    return True
+                for v in children_dict[key]:
+                    if _remove_in_children(v.children):
+                        return True
+            return False
+
+        for p, lst in self.variations.items():
+            for v in lst:
+                if _remove_in_children(v.children):
+                    return True
+
+        return False
+
+    # ---- Serialization ----
+    def to_dict(self) -> Dict:
+        def node_to_obj(node: VariationNode) -> Dict:
+            return {
+                "var_id": node.var_id,
+                "name": node.name,
+                "san_moves": list(node.san_moves),
+                "san_comments": list(node.san_comments),
+                "children": {str(k): [node_to_obj(ch) for ch in lst] for k, lst in node.children.items()}
+            }
+
+        out = {str(p): [node_to_obj(n) for n in lst] for p, lst in self.variations.items()}
+        meta = {"next_var_id": self._next_var_id, "variations": out}
+        return meta
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'VariationManager':
+        mgr = cls()
+        try:
+            mgr._next_var_id = int(data.get("next_var_id", mgr._next_var_id))
+            raw = data.get("variations", {})
+
+            def obj_to_node(obj: Dict) -> VariationNode:
+                node = VariationNode(int(obj["var_id"]), obj.get("name", ""), list(obj.get("san_moves", [])))
+                mgr._register(node)
+                # load comments if present
+                node.san_comments = list(obj.get("san_comments", ["" for _ in node.san_moves]))
+                for k, lst in obj.get("children", {}).items():
+                    idx = int(k)
+                    node.children[idx] = [obj_to_node(ch) for ch in lst]
+                return node
+
+            for p_str, lst in raw.items():
+                p = int(p_str)
+                mgr.variations[p] = [obj_to_node(obj) for obj in lst]
+        except Exception:
+            # leave empty on parse error
+            pass
+        return mgr
 
 
 # ======================= state_utils.py =======================
@@ -120,6 +266,19 @@ def create_menubar(gui):
     file_menu.add_command(label="退出(X)", command=gui.on_close)
     menubar.add_cascade(label="文件(F)", menu=file_menu)
 
+    # Also add direct Alt+letter bindings for common file actions (fallback for Alt+F then letter)
+    try:
+        gui.root.bind_all('<Alt-o>', lambda e: gui.load_game())
+        gui.root.bind_all('<Alt-O>', lambda e: gui.load_game())
+        gui.root.bind_all('<Alt-n>', lambda e: gui.new_game())
+        gui.root.bind_all('<Alt-N>', lambda e: gui.new_game())
+        gui.root.bind_all('<Alt-s>', lambda e: gui.save_quick())
+        gui.root.bind_all('<Alt-S>', lambda e: gui.save_quick())
+        gui.root.bind_all('<Alt-x>', lambda e: gui.on_close())
+        gui.root.bind_all('<Alt-X>', lambda e: gui.on_close())
+    except Exception:
+        pass
+
     # ================= 编辑 =================
     edit_menu = tk.Menu(menubar, tearoff=False)
     edit_menu.add_command(label="撤销(U)    Ctrl+Z", command=gui.undo)
@@ -136,11 +295,24 @@ def create_menubar(gui):
 
     # ================= 视图 / View =================
     view_menu = tk.Menu(menubar, tearoff=False)
-    view_menu.add_checkbutton(label="显示棋盘", variable=gui.board_visible, command=gui.toggle_board_visibility)
+    # show accelerators in labels and bind shortcuts to toggle handlers
+    view_menu.add_checkbutton(label="显示棋盘\tCtrl+B", variable=gui.board_visible, command=gui.toggle_board_visibility)
     view_menu.add_separator()
-    view_menu.add_checkbutton(label="显示棋谱属性", variable=gui.attr_visible, command=gui.toggle_attr_visibility)
-    view_menu.add_checkbutton(label="显示注释", variable=gui.notes_visible, command=gui.toggle_notes_visibility)
-    view_menu.add_checkbutton(label="显示变着列表", variable=gui.vari_visible, command=gui.toggle_variations_visibility)
+    view_menu.add_checkbutton(label="显示棋谱属性\tCtrl+P", variable=gui.attr_visible, command=gui.toggle_attr_visibility)
+    view_menu.add_checkbutton(label="显示注释\tCtrl+N", variable=gui.notes_visible, command=gui.toggle_notes_visibility)
+    view_menu.add_checkbutton(label="显示变着列表\tCtrl+L", variable=gui.vari_visible, command=gui.toggle_variations_visibility)
+    # Bind shortcuts
+    try:
+        gui.root.bind_all('<Control-b>', lambda e: (gui.board_visible.set(not gui.board_visible.get()), gui.toggle_board_visibility()))
+        gui.root.bind_all('<Control-B>', lambda e: (gui.board_visible.set(not gui.board_visible.get()), gui.toggle_board_visibility()))
+        gui.root.bind_all('<Control-p>', lambda e: (gui.attr_visible.set(not gui.attr_visible.get()), gui.toggle_attr_visibility()))
+        gui.root.bind_all('<Control-P>', lambda e: (gui.attr_visible.set(not gui.attr_visible.get()), gui.toggle_attr_visibility()))
+        gui.root.bind_all('<Control-n>', lambda e: (gui.notes_visible.set(not gui.notes_visible.get()), gui.toggle_notes_visibility()))
+        gui.root.bind_all('<Control-N>', lambda e: (gui.notes_visible.set(not gui.notes_visible.get()), gui.toggle_notes_visibility()))
+        gui.root.bind_all('<Control-l>', lambda e: (gui.vari_visible.set(not gui.vari_visible.get()), gui.toggle_variations_visibility()))
+        gui.root.bind_all('<Control-L>', lambda e: (gui.vari_visible.set(not gui.vari_visible.get()), gui.toggle_variations_visibility()))
+    except Exception:
+        pass
     menubar.add_cascade(label="视图(V)", menu=view_menu)
 
     # ================= 书签 =================
@@ -154,6 +326,43 @@ def create_menubar(gui):
     help_menu = tk.Menu(menubar, tearoff=False)
     help_menu.add_command(label="关于", command=gui.about)
     menubar.add_cascade(label="帮助(H)", menu=help_menu)
+
+    # build a mapping from top-level menu label -> { key: callable }
+    try:
+        gui._menu_mnemonics = {
+            '文件(F)': {
+                'n': gui.new_game,
+                'w': gui.new_game_wizard,
+                'y': lambda: gui.spawn_new_window(new_game=True),
+                'o': gui.load_game,
+                'z': lambda: gui.spawn_new_window(open_dialog=True),
+                's': gui.save_quick,
+                'e': gui.save_game,
+                'f': gui.save_game,
+                'p': gui.edit_properties,
+                'd': gui.delete_current_game,
+                'x': gui.on_close
+            },
+            '编辑(E)': {
+                'z': gui.undo,
+                'u': gui.undo,
+                'r': gui.redo
+            },
+            '视图(V)': {
+                'b': gui.toggle_board_visibility,
+                'p': gui.toggle_attr_visibility,
+                'n': gui.toggle_notes_visibility,
+                'l': gui.toggle_variations_visibility
+            },
+            '书签(M)': {
+                'm': gui.bookmark_add
+            },
+            '帮助(H)': {
+                # no mnemonic actions by default
+            }
+        }
+    except Exception:
+        gui._menu_mnemonics = {}
 
     return menubar
 
@@ -394,45 +603,160 @@ class VariationPanel:
         box = ttk.Frame(self.frame)
         box.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
-        self.listbox = tk.Listbox(box, font=("Microsoft YaHei", 11), exportselection=False)
-        vbar = ttk.Scrollbar(box, orient=tk.VERTICAL, command=self.listbox.yview)
-        self.listbox.configure(yscrollcommand=vbar.set)
-        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Use a Treeview to display nested variations with expand/collapse
+        self.tree = ttk.Treeview(box, show='tree')
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vbar = ttk.Scrollbar(box, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vbar.set)
         vbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         btns = ttk.Frame(self.frame)
         btns.pack(fill=tk.X, padx=6, pady=(0, 8))
-        ttk.Button(btns, text="应用为主线", command=self._apply_selected).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btns, text="删除", command=self._delete_selected).pack(side=tk.RIGHT, padx=4)
+        self.btn_apply = ttk.Button(btns, text="应用为主线", command=self._apply_selected)
+        self.btn_apply.pack(side=tk.RIGHT, padx=4)
+        # 新增：恢复主线按钮
+        self.btn_restore = ttk.Button(btns, text="恢复主线", command=self._restore_mainline)
+        self.btn_restore.pack(side=tk.RIGHT, padx=4)
+        self.btn_delete = ttk.Button(btns, text="删除", command=self._delete_selected)
+        self.btn_delete.pack(side=tk.RIGHT, padx=4)
+        self.btn_edit_comments = ttk.Button(btns, text="编辑注释", command=self._edit_selected_comments)
+        self.btn_edit_comments.pack(side=tk.RIGHT, padx=4)
+        self.btn_view = ttk.Button(btns, text="查看变着", command=self._toggle_view_selected)
+        self.btn_view.pack(side=tk.RIGHT, padx=4)
 
-        self.listbox.bind("<Double-Button-1>", lambda e: self._apply_selected())
+        self.tree.bind("<Double-1>", lambda e: self._apply_selected())
 
         self._cur_pivot = None   # 当前面板显示的 pivot_ply
 
     def refresh_for_pivot(self, pivot_ply: int):
         """根据 pivot_ply （从1开始）刷新变着列表"""
         self._cur_pivot = pivot_ply
-        self.listbox.delete(0, tk.END)
+        # clear tree
+        for it in self.tree.get_children():
+            self.tree.delete(it)  # Clear existing items in the tree
         self.lbl.config(text=f"变着列表（第 {pivot_ply} 步）")
         vs = self.gui.var_mgr.list(pivot_ply)
+
+        def _insert_node(parent_iid, node: 'VariationNode'):
+            iid = str(node.var_id)
+            text = f"[{node.var_id}] {node.name}"
+            try:
+                self.tree.insert(parent_iid, 'end', iid=iid, text=text)
+            except Exception:
+                # fallback: let tree generate iid
+                iid = self.tree.insert(parent_iid, 'end', text=text)
+            # children: node.children is {pivot_index: [VariationNode]}
+            for pivot_index in sorted(node.children.keys()):
+                for child in node.children[pivot_index]:
+                    _insert_node(iid, child)
+
         for v in vs:
-            self.listbox.insert(tk.END, f"[{v.var_id}] {v.name}")
+            _insert_node('', v)
 
     def _selected_var_id(self) -> Optional[int]:
-        sel = self.listbox.curselection()
+        sel = self.tree.selection()
         if not sel:
             return None
-        text = self.listbox.get(sel[0])
+        iid = sel[0]
         try:
-            return int(text.split(']')[0].lstrip('['))
+            return int(iid)
         except Exception:
-            return None
+            # fallback: parse displayed text
+            text = self.tree.item(iid, 'text')
+            try:
+                return int(text.split(']')[0].lstrip('['))
+            except Exception:
+                return None
 
     def _apply_selected(self):
         var_id = self._selected_var_id()
         if var_id is None or self._cur_pivot is None:
-            return
+            return  # No variation selected or current pivot is None
         self.gui.apply_variation_by_id(self._cur_pivot, var_id)
+
+    def _restore_mainline(self):
+        try:
+            self.gui.restore_mainline()  # Restore the main line from variations
+        except Exception:
+            pass
+
+    def _edit_selected_comments(self):
+        var_id = self._selected_var_id()
+        if var_id is None:
+            return
+        node = self.gui.var_mgr.find_by_id(var_id)
+        if node is None:
+            return
+
+        dlg = tk.Toplevel(self.frame)
+        dlg.title(f"编辑变着注释 - {node.name}")
+        dlg.transient(self.frame)
+        dlg.grab_set()
+
+        # list moves with a text box per half-move
+        rows = []
+        for i, san in enumerate(node.san_moves, start=1):
+            lbl = ttk.Label(dlg, text=f"{i}. {san}")
+            lbl.grid(row=(i-1)*2, column=0, sticky="w", padx=6, pady=(6,0))
+            txt = tk.Text(dlg, width=60, height=3)
+            txt.grid(row=(i-1)*2+1, column=0, padx=6, pady=(0,6))
+            # prefill
+            try:
+                txt.insert("1.0", node.san_comments[i-1])
+            except Exception:
+                pass
+            rows.append(txt)
+
+        def on_save():
+            try:
+                node.san_comments = [t.get("1.0", "end").strip() for t in rows]
+                self.gui.mark_dirty()
+                dlg.destroy()
+                messagebox.showinfo("已保存", "已保存变着注释。", parent=self.gui.root)
+            except Exception:
+                messagebox.showwarning("保存失败", "无法保存变着注释。", parent=self.gui.root)
+
+        btn = ttk.Frame(dlg)
+        btn.grid(row=len(rows)*2, column=0, sticky="e", padx=6, pady=6)
+        ttk.Button(btn, text="保存", command=on_save).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn, text="取消", command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+
+    def _toggle_view_selected(self):
+        var_id = self._selected_var_id()
+        if var_id is None or self._cur_pivot is None:
+            return
+        cur = getattr(self.gui, '_viewing_variation', None)
+        if cur and cur[0] == self._cur_pivot and cur[1] == var_id:
+            # cancel viewing
+            self.gui._viewing_variation = None
+            # update UI
+            try:
+                self.lbl.config(text=f"变着列表（第 {self._cur_pivot} 步）", foreground="black")
+                self.btn_view.config(text="查看变着")
+                self.tree.selection_remove(str(var_id))
+            except Exception:
+                pass
+        else:
+            self.gui._viewing_variation = (self._cur_pivot, var_id)
+            # update UI: show which variation is being viewed and select it
+            node = self.gui.var_mgr.find_by_id(var_id)
+            try:
+                name = node.name if node is not None else str(var_id)
+                self.lbl.config(text=f"查看变着：{name}（第 {self._cur_pivot} 步）", foreground="#0066CC")
+                # select and ensure visibility
+                try:
+                    self.tree.selection_set(str(var_id))
+                    self.tree.see(str(var_id))
+                except Exception:
+                    pass
+                self.btn_view.config(text="取消查看")
+            except Exception:
+                pass
+        # refresh note editor to show appropriate comments
+        try:
+            self.gui._refresh_note_editor()
+        except Exception:
+            pass
 
     def _delete_selected(self):
         var_id = self._selected_var_id()
@@ -559,6 +883,7 @@ class FileOps:
                     "moves": self.gui.moves_list,                    # 仅主线
                     "meta": self.gui.metadata,
                     "comments": {str(k): v for k, v in self.gui.comments.items()},
+                    "variations": self.gui.var_mgr.to_dict(),
                 }
                 write_json(fn, data)
 
@@ -625,6 +950,8 @@ class FileOps:
                 self.gui.metadata = data.get('meta', {"title": "", "author": "", "remark": ""})
                 raw_comm = data.get('comments', {})
                 self.gui.comments = {int(k): v for k, v in raw_comm.items()}
+                # load variations (if present)
+                self.gui.var_mgr = VariationManager.from_dict(data.get('variations', {}))
 
             elif ext == '.txt':
                 moves = []
@@ -790,8 +1117,228 @@ class BookmarkOps:
 
     def bookmark_manage(self):
         fk = self.file_key()
-        num = len(self.bookmarks.get(fk, []))
-        messagebox.showinfo("书签", f"当前棋谱共有 {num} 个书签。")
+        items = self.bookmarks.setdefault(fk, [])
+
+        dlg = tk.Toplevel(self.gui.root)
+        dlg.title("管理书签")
+        dlg.transient(self.gui.root)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        lbl = ttk.Label(frm, text=f"当前棋谱：{os.path.basename(fk)}  共 {len(items)} 个书签")
+        lbl.pack(anchor="w")
+
+        body = ttk.Frame(frm)
+        body.pack(fill=tk.BOTH, expand=True, pady=(6,4))
+
+        listbox = tk.Listbox(body, width=38, height=12)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # preview canvas at right
+        preview_frame = ttk.Frame(body)
+        preview_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(8,0))
+        preview_lbl = ttk.Label(preview_frame, text="预览")
+        preview_lbl.pack()
+        preview_canvas = tk.Canvas(preview_frame, width=220, height=220, bg='#DEB887')
+        preview_canvas.pack(pady=(4,0))
+
+        def refresh_list():
+            listbox.delete(0, tk.END)
+            for i, it in enumerate(items, start=1):
+                name = it.get('name','')
+                ply = it.get('ply', 0)
+                listbox.insert(tk.END, f"{i}. {name} (ply={ply})")
+            lbl.config(text=f"当前棋谱：{os.path.basename(fk)}  共 {len(items)} 个书签")
+
+        def on_add():
+            name = simpledialog.askstring("添加书签", "书签名称：", parent=dlg)
+            if not name:
+                return
+            ply = simpledialog.askinteger("半步数", "跳转到的半步数 (ply)：", parent=dlg, initialvalue=self.current_ply())
+            if ply is None:
+                return
+            items.append({"name": name, "ply": int(ply)})
+            write_json(BOOKMARK_JSON, self.bookmarks)
+            refresh_list()
+
+        def on_edit():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("提示", "请先选择一个书签。", parent=dlg)
+                return
+            idx = sel[0]
+            cur = items[idx]
+            new_name = simpledialog.askstring("编辑书签", "名称：", parent=dlg, initialvalue=cur.get('name',''))
+            if new_name is None:
+                return
+            new_ply = simpledialog.askinteger("编辑半步数", "半步数 (ply)：", parent=dlg, initialvalue=cur.get('ply', 0))
+            if new_ply is None:
+                return
+            cur['name'] = new_name
+            cur['ply'] = int(new_ply)
+            write_json(BOOKMARK_JSON, self.bookmarks)
+            refresh_list()
+
+        def on_move_up():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            if idx <= 0:
+                return
+            items[idx-1], items[idx] = items[idx], items[idx-1]
+            write_json(BOOKMARK_JSON, self.bookmarks)
+            refresh_list()
+            listbox.selection_set(idx-1)
+
+        def on_move_down():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            if idx >= len(items)-1:
+                return
+            items[idx+1], items[idx] = items[idx], items[idx+1]
+            write_json(BOOKMARK_JSON, self.bookmarks)
+            refresh_list()
+            listbox.selection_set(idx+1)
+
+        def on_rename():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("提示", "请先选择一个书签。", parent=dlg)
+                return
+            idx = sel[0]
+            cur = items[idx]
+            new = simpledialog.askstring("重命名书签", "新名称：", parent=dlg, initialvalue=cur.get('name',''))
+            if not new:
+                return
+            cur['name'] = new
+            write_json(BOOKMARK_JSON, self.bookmarks)
+            refresh_list()
+
+        def on_delete():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("提示", "请先选择一个书签。", parent=dlg)
+                return
+            idx = sel[0]
+            if not messagebox.askyesno("确认", "确认删除选中书签？", parent=dlg):
+                return
+            items.pop(idx)
+            write_json(BOOKMARK_JSON, self.bookmarks)
+            refresh_list()
+
+        def on_import():
+            fn = filedialog.askopenfilename(filetypes=[('JSON', '*.json'), ('All', '*.*')], parent=dlg)
+            if not fn:
+                return
+            try:
+                with open(fn, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    # expect list of {name, ply}
+                    for it in data:
+                        if 'name' in it and 'ply' in it:
+                            items.append({'name': str(it['name']), 'ply': int(it['ply'])})
+                elif isinstance(data, dict):
+                    # try to accept full bookmarks file
+                    for fk, lst in data.items():
+                        if isinstance(lst, list):
+                            for it in lst:
+                                if 'name' in it and 'ply' in it:
+                                    items.append({'name': str(it['name']), 'ply': int(it['ply'])})
+                write_json(BOOKMARK_JSON, self.bookmarks)
+                refresh_list()
+                messagebox.showinfo('导入成功', '已导入书签。', parent=dlg)
+            except Exception as e:
+                messagebox.showwarning('导入失败', str(e), parent=dlg)
+
+        def on_jump():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showinfo("提示", "请先选择一个书签。", parent=dlg)
+                return
+            idx = sel[0]
+            ply = items[idx].get('ply', 0)
+            self._restore_to_ply(ply)
+            dlg.destroy()
+
+        def on_export():
+            # export current file's bookmarks as JSON to clipboard
+            try:
+                txt = json.dumps(items, ensure_ascii=False, indent=2)
+                try:
+                    self.gui.root.clipboard_clear()
+                    self.gui.root.clipboard_append(txt)
+                    messagebox.showinfo("已复制", "已将书签以 JSON 复制到剪贴板。", parent=dlg)
+                except Exception:
+                    # fallback: save to file
+                    fn = filedialog.asksaveasfilename(defaultextension='.json', filetypes=[('JSON', '*.json')], parent=dlg)
+                    if fn:
+                        with open(fn, 'w', encoding='utf-8') as f:
+                            f.write(txt)
+                        messagebox.showinfo("已保存", f"已保存到：{fn}", parent=dlg)
+            except Exception as e:
+                messagebox.showwarning("导出失败", str(e), parent=dlg)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill=tk.X, pady=(4,0))
+        left_group = ttk.Frame(btns)
+        left_group.pack(side=tk.LEFT)
+        ttk.Button(left_group, text="添加", command=on_add).pack(side=tk.LEFT, padx=4)
+        ttk.Button(left_group, text="编辑", command=on_edit).pack(side=tk.LEFT, padx=4)
+        ttk.Button(left_group, text="上移", command=on_move_up).pack(side=tk.LEFT, padx=4)
+        ttk.Button(left_group, text="下移", command=on_move_down).pack(side=tk.LEFT, padx=4)
+        ttk.Button(left_group, text="删除", command=on_delete).pack(side=tk.LEFT, padx=4)
+        ttk.Button(left_group, text="导入", command=on_import).pack(side=tk.LEFT, padx=4)
+        ttk.Button(left_group, text="导出", command=on_export).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="关闭", command=dlg.destroy).pack(side=tk.RIGHT, padx=4)
+
+        def on_select(evt=None):
+            sel = listbox.curselection()
+            if not sel:
+                # clear preview
+                preview_canvas.delete('all')
+                return
+            idx = sel[0]
+            ply = items[idx].get('ply', 0)
+            # render preview board for this ply
+            try:
+                tmp_board = xr.Board()
+                # build flattened san list
+                flat = []
+                for r,b in self.gui.moves_list:
+                    if r: flat.append(r)
+                    if b: flat.append(b)
+                for m in flat[:ply]:
+                    try:
+                        tmp_board.play_san(m)
+                    except Exception:
+                        # best-effort, ignore failures
+                        pass
+                # prepare db.board_data from tmp_board
+                for r in range(db.BOARD_ROWS):
+                    for c in range(db.BOARD_COLS):
+                        piece = tmp_board.piece_at((r,c))
+                        db.board_data[r][c] = '.' if piece is None else (piece.ptype.upper() if piece.color == 'r' else piece.ptype.lower())
+                # draw on preview canvas with temporary size
+                old_size = db.SQUARE_SIZE
+                try:
+                    db.SQUARE_SIZE = min(32, old_size)
+                    db.draw_board(preview_canvas, self.gui.piece_font)
+                finally:
+                    db.SQUARE_SIZE = old_size
+            except Exception:
+                preview_canvas.delete('all')
+
+        listbox.bind('<Double-1>', lambda e: on_jump())
+        listbox.bind('<<ListboxSelect>>', on_select)
+        refresh_list()
+        listbox.focus_set()
+        self.gui.root.wait_window(dlg)
 
     def bookmark_jump(self):
         fk = self.file_key()
@@ -916,6 +1463,8 @@ class XiangqiGUI:
         # 变着
         self.var_mgr = VariationManager()
         self._building_var: Optional[Tuple[int, int]] = None  # (pivot_ply, var_id) 当前“录制中的变着”
+        self._viewing_variation: Optional[Tuple[int, int]] = None  # (pivot_ply, var_id) 当前在主界面查看的变着（若有）
+        self._applied_variation: Optional[Tuple[int, int]] = None  # (pivot_ply, var_id) 当前已经应用到主线的变着（若有）
 
         # 视图/交互状态
         self.selected_sq = None
@@ -989,7 +1538,135 @@ class XiangqiGUI:
         self.attr_visible = tk.BooleanVar(value=_settings.get('attr_visible', True))
         self.notes_visible = tk.BooleanVar(value=_settings.get('notes_visible', True))
         self.vari_visible = tk.BooleanVar(value=_settings.get('vari_visible', True))
-        self.root.config(menu=create_menubar(self))
+        # create menubar and keep reference for keyboard menu activation
+        try:
+            self.menubar = create_menubar(self)
+            self.root.config(menu=self.menubar)
+        except Exception:
+            self.root.config(menu=create_menubar(self))
+
+        # Bind Alt+letter to open top-level menus (File=F, Edit=E, View=V, Bookmarks=M, Help=H)
+        try:
+            def _post_menu(idx):
+                try:
+                    mb = self.menubar
+                    name = mb.entrycget(idx, 'menu')
+                    if not name:
+                        return
+                    submenu = mb.nametowidget(name)
+                    x = self.root.winfo_rootx() + 10
+                    y = self.root.winfo_rooty() + 30
+                    submenu.post(x, y)
+                except Exception:
+                    pass
+            # bind both lower and upper case
+            # map alt keys to menu labels to ensure correct menu is opened
+            label_map = {
+                'f': '文件(F)',
+                'e': '编辑(E)',
+                'v': '视图(V)',
+                'm': '书签(M)',
+                'h': '帮助(H)'
+            }
+            def _post_menu_by_label(lbl):
+                try:
+                    mb = self.menubar
+                    end = mb.index('end')
+                    if end is None:
+                        return
+                    for i in range(end + 1):
+                        try:
+                            entry_label = mb.entrycget(i, 'label')
+                        except Exception:
+                            entry_label = None
+                        if entry_label == lbl:
+                            name = mb.entrycget(i, 'menu')
+                            if not name:
+                                return
+                            submenu = mb.nametowidget(name)
+                            x = self.root.winfo_rootx() + 10
+                            y = self.root.winfo_rooty() + 30
+                            submenu.post(x, y)
+                            # remember posted submenu and label
+                            self._posted_submenu = submenu
+                            self._posted_menu_label = lbl
+
+                            # temporary key handler to accept single-letter activation
+                            def _on_menu_key(event):
+                                try:
+                                    key = (event.char or event.keysym or '')
+                                    ch = key.lower()
+                                    # Try to find an entry in the posted submenu whose label contains the mnemonic like '(O)'
+                                    try:
+                                        # first try explicit mnemonic mapping attached to gui
+                                        menu_map = getattr(self, '_menu_mnemonics', None)
+                                        if menu_map and getattr(self, '_posted_menu_label', None):
+                                            lbl = self._posted_menu_label
+                                            mm = menu_map.get(lbl, {})
+                                            if ch in mm:
+                                                try:
+                                                    mm[ch]()
+                                                except Exception:
+                                                    pass
+                                                try:
+                                                    if hasattr(self, '_posted_submenu') and self._posted_submenu:
+                                                        self._posted_submenu.unpost()
+                                                except Exception:
+                                                    pass
+                                                return
+                                        # fallback: scan submenu labels for (X) mnemonic
+                                        submenu = getattr(self, '_posted_submenu', None)
+                                        if submenu is not None:
+                                            end = submenu.index('end')
+                                            if end is not None:
+                                                for ii in range(end + 1):
+                                                    try:
+                                                        lab = submenu.entrycget(ii, 'label') or ''
+                                                    except Exception:
+                                                        lab = ''
+                                                    if not lab:
+                                                        continue
+                                                    # look for (X) style mnemonic
+                                                    if f'({key.upper()})' in lab or f'({key.lower()})' in lab:
+                                                        try:
+                                                            submenu.invoke(ii)
+                                                        except Exception:
+                                                            pass
+                                                        try:
+                                                            submenu.unpost()
+                                                        except Exception:
+                                                            pass
+                                                        return
+                                    except Exception:
+                                        pass
+                                    # fallback: nothing invoked
+                                finally:
+                                    try:
+                                        self.root.unbind_all('<Key>')
+                                    except Exception:
+                                        pass
+
+                            # bind single-key handler (not global) and return
+                            try:
+                                # bind globally so we receive the next key even if menu has focus
+                                self.root.bind_all('<Key>', _on_menu_key)
+                            except Exception:
+                                pass
+                            return
+                except Exception:
+                    pass
+
+            for key, lbl in label_map.items():
+                def _make_alt_handler(L):
+                    def _h(event=None):
+                        _post_menu_by_label(L)
+                        return "break"
+                    return _h
+                h = _make_alt_handler(lbl)
+                self.root.bind_all(f'<Alt-{key}>', h)
+                self.root.bind_all(f'<Alt-{key.upper()}>', h)
+        except Exception:
+            pass
 
         # Apply saved visibility settings: hide panes whose flags are False
         try:
@@ -1093,6 +1770,33 @@ class XiangqiGUI:
         self.txt_note.delete("1.0", "end")
         if ply is None:
             return
+        # If currently viewing a variation, show variation's per-move comment when applicable
+        view = getattr(self, '_viewing_variation', None)
+        if view:
+            pivot, var_id = view
+            node = self.var_mgr.find_by_id(var_id)
+            if node is not None:
+                idx = ply - pivot
+                if 0 <= idx < len(node.san_comments):
+                    txt = node.san_comments[idx] or ""
+                    # show variant comment (may be empty)
+                    if txt:
+                        self.txt_note.insert("1.0", txt)
+                    return
+        # If a variation is applied to the mainline and the current ply falls inside it,
+        # show the variation's per-move comment (take precedence over mainline comment).
+        applied = getattr(self, '_applied_variation', None)
+        if applied:
+            apivot, avar = applied
+            node = self.var_mgr.find_by_id(avar)
+            if node is not None:
+                idx = ply - apivot
+                if 0 <= idx < len(node.san_comments):
+                    txt = node.san_comments[idx] or ""
+                    if txt:
+                        self.txt_note.insert("1.0", txt)
+                    return
+        # default: mainline comment
         txt = self.comments.get(ply, "")
         if txt:
             self.txt_note.insert("1.0", txt)
@@ -1102,7 +1806,33 @@ class XiangqiGUI:
         if ply is None:
             messagebox.showinfo("提示", "请先在棋谱中选择一个半步。")
             return
-        self.comments[ply] = self.txt_note.get("1.0", "end").strip()
+        txt = self.txt_note.get("1.0", "end").strip()
+        # If currently viewing a variation, save into that variation's san_comments
+        view = getattr(self, '_viewing_variation', None)
+        if view:
+            pivot, var_id = view
+            node = self.var_mgr.find_by_id(var_id)
+            if node is not None:
+                idx = ply - pivot
+                if 0 <= idx < len(node.san_comments):
+                    node.san_comments[idx] = txt
+                    self.mark_dirty()
+                    messagebox.showinfo("成功", f"已保存变着注释（ply={ply}）。")
+                    return
+        # If a variation was applied to mainline, also save into that variation's san_comments
+        applied = getattr(self, '_applied_variation', None)
+        if applied:
+            apivot, avar = applied
+            node = self.var_mgr.find_by_id(avar)
+            if node is not None:
+                idx = ply - apivot
+                if 0 <= idx < len(node.san_comments):
+                    node.san_comments[idx] = txt
+                    self.mark_dirty()
+                    messagebox.showinfo("成功", f"已保存变着注释（ply={ply}）。")
+                    return
+        # default: save to mainline comments
+        self.comments[ply] = txt
         self.mark_dirty()
         messagebox.showinfo("成功", f"已保存注释（ply={ply}）。")
 
@@ -1312,7 +2042,7 @@ class XiangqiGUI:
             if bmove: flat.append(bmove)
         return flat
 
-    def _apply_variation_to_mainline(self, pivot_ply: int, v: Variation, jump_to_end=False):
+    def _apply_variation_to_mainline(self, pivot_ply: int, v: VariationNode, jump_to_end=False):
         """
         主线 := 主线[:pivot-1] + v.san_moves
         pivot_ply 从 1 开始；通常切换后跳到 pivot_ply 位置
@@ -1346,8 +2076,68 @@ class XiangqiGUI:
         v = self.var_mgr.get(pivot_ply, var_id)
         if not v:
             return
+        # 保存当前主线备份（包含注释），以便可以恢复
+        try:
+            self._last_mainline_backup = {
+                'moves': [list(p) for p in self.moves_list],
+                'comments': dict(self.comments)
+            }
+        except Exception:
+            self._last_mainline_backup = None
+
         self._apply_variation_to_mainline(pivot_ply, v, jump_to_end=False)
+        # 将变着内的注释复制到主线相应半步（覆盖或写入）
+        try:
+            for i, c in enumerate(v.san_comments):
+                ply = pivot_ply + i
+                if c:
+                    self.comments[ply] = c
+        except Exception:
+            pass
         self._building_var = None  # 应用后结束录制
+        # stop viewing any variation when applying
+        self._viewing_variation = None
+        # remember which variation is now applied to mainline so edits persist back
+        try:
+            self._applied_variation = (pivot_ply, var_id)
+        except Exception:
+            self._applied_variation = None
+        self.mark_dirty()
+        # ensure note editor reflects variation comments (overwrite any stale mainline display)
+        try:
+            self._refresh_note_editor()
+        except Exception:
+            pass
+
+    def restore_mainline(self):
+        """恢复最近一次被替换前的主线（如果有备份）。"""
+        bk = getattr(self, '_last_mainline_backup', None)
+        if not bk:
+            messagebox.showinfo("提示", "没有可恢复的主线。", parent=self.root)
+            return
+        try:
+            if isinstance(bk, dict):
+                self.moves_list = [list(p) for p in bk.get('moves', [])]
+                # restore comments if present
+                try:
+                    self.comments = dict(bk.get('comments', {}))
+                except Exception:
+                    pass
+            else:
+                self.moves_list = [list(p) for p in bk]
+        except Exception:
+            # 恢复失败时告知用户
+            messagebox.showwarning("恢复失败", "恢复主线时发生错误。", parent=self.root)
+            return
+        # 清除备份（一次性恢复）
+        self._last_mainline_backup = None
+        # clear applied variation state
+        self._applied_variation = None
+        # 恢复棋盘到当前选择或末尾
+        flat_len = len(self._mainline_san_flat())
+        cur = self._current_selected_ply if self._current_selected_ply is not None else flat_len
+        tgt = min(cur, flat_len)
+        self.restore_to_ply(tgt)
         self.mark_dirty()
 
     def record_move_played(self, san: str):
@@ -1362,8 +2152,8 @@ class XiangqiGUI:
             prev_sel = len(self._mainline_san_flat())
         flat_len = len(self._mainline_san_flat())
 
+        # 在末尾继续：主线追加
         if prev_sel == flat_len:
-            # 在末尾继续：主线追加
             self.append_move_mainline(san)
             self._current_selected_ply = len(self.board.history)
             self._select_moves_row_for_ply(self._current_selected_ply)
@@ -1373,24 +2163,38 @@ class XiangqiGUI:
             self._building_var = None
             return
 
-        # —— 非末尾：录为“变着” —— #
         pivot = prev_sel + 1  # 变着从下一步开始
-        if self._building_var and self._building_var[0] == pivot:
+
+        # —— 非末尾：录为“变着” —— #
+        # if self._building_var != None and self._building_var[0] == pivot:
+        if self._building_var != None:
             # 继续向同一条变着追加
+            print("==============================")
+            print(self._building_var)
             cur_var = self.var_mgr.get(pivot, self._building_var[1])
             if cur_var:
                 cur_var.san_moves.append(san)
+                # keep comments aligned
+                cur_var.san_comments.append("")
         else:
-            # 新建一条变着
+            # 新建一条变着 (让 VariationManager 生成规范名称)
+            print("++++++++++++++++++++++++++++++")
+            print(self._building_var)
             var_id = self.var_mgr.add(pivot, [san], name=san)
             self._building_var = (pivot, var_id)
+            print(self._building_var)
+            # 更新右下变着列表（显示当前 pivot 的备选）
+            self.refresh_variations_box(pivot_ply=pivot)
+            self._current_selected_ply = len(self.board.history)
+            self._select_moves_row_for_ply(self._current_selected_ply)
+            # 注意：主线不变，等待用户从变着列表中选择切换
+            self.mark_dirty()
+        
+        # keep pivot to start of variation
+        pivot = pivot - len(self._building_var)-1        
+        
 
-        # 更新右下变着列表（显示当前 pivot 的备选）
-        self.refresh_variations_box(pivot_ply=pivot)
-        self._current_selected_ply = len(self.board.history)
-        self._select_moves_row_for_ply(self._current_selected_ply)
-        # 注意：主线不变，等待用户从变着列表中选择切换
-        self.mark_dirty()
+
 
     # ================= 菜单委托 =================
     # 文件
