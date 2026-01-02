@@ -835,6 +835,7 @@ class FileOps:
         self.gui.metadata["author"] = author
         self.gui.board.side_to_move = 'r' if side.lower() != 'b' else 'b'
         self.gui.root.title(f"象棋摆谱器 - {self.gui.metadata['title'] or '新局'}")
+        self.gui.refresh_attr_panel()
         self.gui.mark_dirty()
 
     def spawn_new_window(self, new_game=False, open_dialog=False):
@@ -900,9 +901,13 @@ class FileOps:
 
             elif ext == '.pgn':
                 headers = [
-                    f"[Event \"Local Game\"]",
+                    f"[Event \"{self.gui.metadata.get('title', 'Chinese Chess')}\"]",
                     f"[Date \"{datetime.date.today().strftime('%Y.%m.%d')}\"]",
+                    f"[Round \"*\"]",
+                    f"[White \"{self.gui.metadata.get('author', '')}\"]",
+                    f"[Black \"*\"]",
                     f"[Result \"*\"]",
+                    f"[Remark \"{self.gui.metadata.get('remark', '')}\"]",
                     ""
                 ]
                 tokens = []
@@ -941,7 +946,7 @@ class FileOps:
         self.add_recent(fn)
         self.recent_index = self.recent_files.index(os.path.abspath(fn))
 
-    def load_game_from_path(self, fn):
+    def load_game_from_path(self, fn, silent=False):
         _, ext = os.path.splitext(fn)
         ext = ext.lower()
         try:
@@ -997,7 +1002,21 @@ class FileOps:
             elif ext == '.pgn':
                 with open(fn, 'r', encoding='utf-8') as f:
                     text = f.read()
-                body = '\n'.join([ln for ln in text.splitlines() if not ln.startswith('[')])
+                
+                lines = text.splitlines()
+                # Parse headers
+                meta = {"title": os.path.basename(fn), "author": "", "remark": ""}
+                for ln in lines:
+                    if ln.startswith('['):
+                        m = re.match(r'^\[(\w+)\s+"(.*)"\]', ln)
+                        if m:
+                            key, val = m.group(1), m.group(2)
+                            if key == "Event" and val != "Chinese Chess": meta["title"] = val
+                            elif key == "Title": meta["title"] = val
+                            elif key == "White" or key == "Author": meta["author"] = val
+                            elif key == "Remark": meta["remark"] = val
+                
+                body = '\n'.join([ln for ln in lines if not ln.startswith('[')])
                 body = body.replace('\\n', ' ').strip()
                 body = re.sub(r'\{[^}]*\}', '', body)
                 tokens = [t for t in re.split(r'\s+', body) if t]
@@ -1012,7 +1031,7 @@ class FileOps:
                     bmove = cur[i+1] if i+1 < len(cur) else ""
                     pairs.append([rmove, bmove])
                 self.gui.moves_list = pairs
-                self.gui.metadata = {"title": os.path.basename(fn), "author": "", "remark": ""}
+                self.gui.metadata = meta
                 self.gui.comments = {}
 
             else:
@@ -1036,9 +1055,11 @@ class FileOps:
             self.gui.refresh_moves_list()
             self.gui._refresh_note_editor()
             self.gui.refresh_variations_box()  # 刷新当前步的变着列表
+            self.gui.refresh_attr_panel()
             self.gui.root.title(f"象棋摆谱器 - {self.gui.metadata.get('title') or os.path.basename(fn)}")
             self.gui.clear_dirty()
-            messagebox.showinfo('加载成功', f'已加载：{fn}', parent=self.gui.root)
+            if not silent:
+                messagebox.showinfo('加载成功', f'已加载：{fn}', parent=self.gui.root)
         except Exception as e:
             messagebox.showerror('加载失败', str(e), parent=self.gui.root)
 
@@ -1834,6 +1855,27 @@ class XiangqiGUI:
         except Exception:
             pass
 
+        # Restore last open file if it exists (Auto-Session)
+        last_file = _settings.get('last_open_file')
+        if last_file and os.path.exists(last_file):
+            def _load_init():
+                try:
+                    # Silent load
+                    self.file_ops.load_game_from_path(last_file, silent=True)
+                    # Update recent index
+                    if last_file in self.file_ops.recent_files:
+                        self.file_ops.recent_index = self.file_ops.recent_files.index(last_file)
+                    else:
+                        self.file_ops.add_recent(last_file)
+                        self.file_ops.recent_index = 0
+                except Exception:
+                    pass
+            # Delay slightly to ensure UI is ready
+            try:
+                self.root.after(200, _load_init)
+            except Exception:
+                pass
+
     # =================== 展示层：主线 ===================
     def get_display_moves(self):
         return self.moves_list
@@ -1868,6 +1910,16 @@ class XiangqiGUI:
         ttk.Button(frm, text="保存属性", command=save_attr).grid(row=4, column=1, sticky="e", padx=6, pady=(4, 8))
         frm.columnconfigure(1, weight=1)
         return frm
+
+    def refresh_attr_panel(self):
+        """Sync attribute panel fields with current metadata."""
+        try:
+            self.var_title.set(self.metadata.get("title", ""))
+            self.var_author.set(self.metadata.get("author", ""))
+            self.txt_remark.delete("1.0", "end")
+            self.txt_remark.insert("1.0", self.metadata.get("remark", ""))
+        except Exception:
+            pass
 
     # ================= 右下：注释 =================
     def _build_notes_frame(self, parent):
@@ -2330,6 +2382,7 @@ class XiangqiGUI:
         self.refresh_moves_list()
         self._refresh_note_editor()
         self.refresh_variations_box()
+        self.refresh_attr_panel()
         self.root.title("象棋摆谱器 - 新局")
         self.clear_dirty()
 
@@ -2417,7 +2470,14 @@ class XiangqiGUI:
         try:
             # merge into existing settings so we don't lose other keys
             _s = read_json(SETTINGS_JSON, {})
+            
+            # Save the current file path if valid
+            curr_file = None
+            if self.file_ops.recent_files and 0 <= self.file_ops.recent_index < len(self.file_ops.recent_files):
+                curr_file = self.file_ops.recent_files[self.file_ops.recent_index]
+
             _s.update({
+                'last_open_file': curr_file,
                 'board_visible': bool(self.board_visible.get()),
                 'attr_visible': bool(self.attr_visible.get()),
                 'notes_visible': bool(self.notes_visible.get()),
