@@ -542,6 +542,8 @@ class MovesPanel:
         # Ensure Up/Down are handled by GUI navigation (avoid listbox changing selection first)
         self.listbox.bind("<Down>", lambda e: self.gui.on_key_down(e))
         self.listbox.bind("<Up>", lambda e: self.gui.on_key_up(e))
+        self.listbox.bind("<j>", lambda e: self.gui.on_key_down(e))
+        self.listbox.bind("<k>", lambda e: self.gui.on_key_up(e))
 
     def refresh(self):
         self.listbox.delete(0, tk.END)
@@ -1533,6 +1535,50 @@ class XiangqiGUI:
                     pass
         except Exception:
             pass
+        # restore pane sash positions if present
+        try:
+            pane_sashes = _settings.get('pane_sashes', {})
+            # Delay sash setting until widgets realized
+            def _apply_sashes():
+                try:
+                    if 'root_paned' in pane_sashes:
+                        vals = pane_sashes.get('root_paned', [])
+                        if vals and hasattr(self, 'root_paned'):
+                            try:
+                                self.root_paned.sashpos(0, int(vals[0]))
+                            except Exception:
+                                pass
+                    if 'right_paned' in pane_sashes:
+                        vals = pane_sashes.get('right_paned', [])
+                        if vals and hasattr(self, 'right_paned'):
+                            try:
+                                self.right_paned.sashpos(0, int(vals[0]))
+                            except Exception:
+                                pass
+                    if 'lower_paned' in pane_sashes:
+                        vals = pane_sashes.get('lower_paned', [])
+                        if vals and hasattr(self, 'lower_paned'):
+                            try:
+                                self.lower_paned.sashpos(0, int(vals[0]))
+                            except Exception:
+                                pass
+                    if 'right_bottom' in pane_sashes:
+                        vals = pane_sashes.get('right_bottom', [])
+                        if vals and hasattr(self, 'right_bottom'):
+                            try:
+                                self.right_bottom.sashpos(0, int(vals[0]))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            try:
+                # call after idle so widgets are mapped
+                self.root.after(50, _apply_sashes)
+            except Exception:
+                _apply_sashes()
+        except Exception:
+            pass
         # Load saved visibility settings
         self.board_visible = tk.BooleanVar(value=_settings.get('board_visible', True))
         self.attr_visible = tk.BooleanVar(value=_settings.get('attr_visible', True))
@@ -1717,6 +1763,76 @@ class XiangqiGUI:
         self.root.bind("<Down>", self.on_key_down)
         self.root.bind("<Up>", self.on_key_up)
         self.root.bind("<Home>", self.on_key_home)
+        # Single-key panel focus shortcuts: h=主线棋谱, l=变着列表, n=注释面板
+        def _focus_moves(event=None):
+            if self._should_ignore_nav():
+                return
+            try:
+                # select current ply row and focus listbox
+                if self._current_selected_ply is None:
+                    cur = len(self.board.history)
+                else:
+                    cur = self._current_selected_ply
+                try:
+                    self._select_moves_row_for_ply(cur)
+                except Exception:
+                    pass
+                try:
+                    self.moves_panel.listbox.focus_set()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return "break"
+
+        def _focus_variations(event=None):
+            if self._should_ignore_nav():
+                return
+            try:
+                # ensure variations box shows current pivot and focus the tree
+                try:
+                    self.refresh_variations_box()
+                except Exception:
+                    pass
+                try:
+                    self.vari_panel.tree.focus_set()
+                    # if nothing selected, select first node
+                    ch = self.vari_panel.tree.get_children()
+                    if ch:
+                        try:
+                            self.vari_panel.tree.selection_set(ch[0])
+                            self.vari_panel.tree.focus(ch[0])
+                            self.vari_panel.tree.see(ch[0])
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return "break"
+
+        def _focus_notes(event=None):
+            if self._should_ignore_nav():
+                return
+            try:
+                try:
+                    self.txt_note.focus_set()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return "break"
+
+        # bind both lower and upper case
+        try:
+            self.root.bind_all('<Key-h>', lambda e: _focus_moves(e))
+            self.root.bind_all('<Key-H>', lambda e: _focus_moves(e))
+            self.root.bind_all('<Key-l>', lambda e: _focus_variations(e))
+            self.root.bind_all('<Key-L>', lambda e: _focus_variations(e))
+            self.root.bind_all('<Key-n>', lambda e: _focus_notes(e))
+            self.root.bind_all('<Key-N>', lambda e: _focus_notes(e))
+        except Exception:
+            pass
 
     # =================== 展示层：主线 ===================
     def get_display_moves(self):
@@ -2310,6 +2426,33 @@ class XiangqiGUI:
             try:
                 self.root.update_idletasks()
                 _s['geometry'] = self.root.geometry()
+            except Exception:
+                pass
+            # save current paned window sash positions
+            try:
+                sashes = {}
+                try:
+                    if hasattr(self, 'root_paned'):
+                        sashes['root_paned'] = [self.root_paned.sashpos(0)]
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'right_paned'):
+                        sashes['right_paned'] = [self.right_paned.sashpos(0)]
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'lower_paned'):
+                        sashes['lower_paned'] = [self.lower_paned.sashpos(0)]
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'right_bottom'):
+                        sashes['right_bottom'] = [self.right_bottom.sashpos(0)]
+                except Exception:
+                    pass
+                if sashes:
+                    _s['pane_sashes'] = sashes
             except Exception:
                 pass
             write_json(SETTINGS_JSON, _s)
