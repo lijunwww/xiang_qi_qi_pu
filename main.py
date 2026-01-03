@@ -7,7 +7,7 @@
 import tkinter as tk
 import chess_rules  # noqa: F401
 import draw_board   # noqa: F401
-from xiangqi_ui_all import XiangqiGUI
+from xiangqi_gui import XiangqiGUI
 
 
 
