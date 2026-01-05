@@ -26,12 +26,12 @@ class XiangqiGUI:
         # —— 基本窗口 ——
         self.root = root
         self.root.title("象棋摆谱器")
-        # allow resizing by mouse drag
+        # 允许鼠标拖动调整大小
         try:
             self.root.resizable(True, True)
         except Exception:
             pass
-        # set a reasonable minimum size so users can resize freely
+        # 设置一个合理的最小尺寸，让用户可以自由调整
         try:
             self.root.minsize(300, 200)
         except Exception:
@@ -870,7 +870,7 @@ class XiangqiGUI:
             return
         # 清除备份（一次性恢复）
         self._last_mainline_backup = None
-        # clear applied variation state
+        # 清除已应用的变着状态
         self._applied_variation = None
         # 恢复棋盘到当前选择或末尾
         flat_len = len(self._mainline_san_flat())

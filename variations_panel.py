@@ -48,21 +48,26 @@ class VariationPanel:
         self.lbl.config(text=f"变着列表（第 {pivot_ply} 步）")
         vs = self.gui.var_mgr.list(pivot_ply)
 
-        def _insert_node(parent_iid, node):
+        def _insert_node(parent_iid, node, idx):
             iid = str(node.var_id)
-            text = f"[{node.var_id}] {node.name}"
+            # Display sequence number [1], [2]... instead of [var_id]
+            text = f"[{idx}] {node.name}"
+            
+            # Use 'values' to store var_id safely in case iid fallback is needed
             try:
-                self.tree.insert(parent_iid, 'end', iid=iid, text=text)
+                self.tree.insert(parent_iid, 'end', iid=iid, text=text, values=(node.var_id,))
             except Exception:
                 # fallback: let tree generate iid
-                iid = self.tree.insert(parent_iid, 'end', text=text)
+                iid = self.tree.insert(parent_iid, 'end', text=text, values=(node.var_id,))
+            
             # children: node.children is {pivot_index: [VariationNode]}
             for pivot_index in sorted(node.children.keys()):
-                for child in node.children[pivot_index]:
-                    _insert_node(iid, child)
+                # For each group of siblings, we number them 1..N
+                for child_i, child in enumerate(node.children[pivot_index], start=1):
+                    _insert_node(iid, child, child_i)
 
-        for v in vs:
-            _insert_node('', v)
+        for i, v in enumerate(vs, start=1):
+            _insert_node('', v, i)
 
     def _selected_var_id(self) -> Optional[int]:
         sel = self.tree.selection()
@@ -72,9 +77,18 @@ class VariationPanel:
         try:
             return int(iid)
         except Exception:
-            # fallback: parse displayed text
+            # check values first
+            values = self.tree.item(iid, 'values')
+            if values:
+                try:
+                    return int(values[0])
+                except Exception:
+                    pass
+            # fallback: parse displayed text (Unreliable if text changed to index)
             text = self.tree.item(iid, 'text')
             try:
+                # This might return the display index, not var_id, if [idx] format is used.
+                # But we rely on iid or values.
                 return int(text.split(']')[0].lstrip('['))
             except Exception:
                 return None

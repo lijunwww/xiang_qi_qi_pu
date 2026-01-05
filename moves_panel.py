@@ -5,6 +5,7 @@ class MovesPanel:
     """
     右侧左下：主线棋谱列表（两行一回合）
     - 单击/回车/双击：跳转到对应半步（ply）
+    - 按上/下键或j/k：跳转到前/后一个回合
     - 展示数据来自 GUI.get_display_moves()（当前主线）
     """
     def __init__(self, gui, parent):
