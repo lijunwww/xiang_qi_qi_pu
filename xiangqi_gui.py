@@ -46,32 +46,58 @@ class XiangqiGUI:
         fam = next((f for f in db.PIECE_FONT_FAMILY_PREFERRED if f in available_fonts), available_fonts[0])
         self.piece_font = font.Font(family=fam, size=db.PIECE_FONT_SIZE, weight='bold')
 
+
+
         # 规则与主线数据
+        # 当前棋盘状态
         self.board = xr.Board()
+        
+        # 主线棋谱数据
         self.moves_list: List[List[str]] = []          # 主线：[[红, 黑], ...]
+        
+        # 棋谱属性
         self.metadata = {"title": "", "author": "", "remark": ""}
 
+
         # 注释：{ ply(int): "注释文本" }
+        # 半步数从 1 开始计数
         self.comments: Dict[int, str] = {}
 
         # 变着
+        # 变着管理器
         self.var_mgr = VariationManager()
+        
+        # 当前变着状态
         self._building_var: Optional[Tuple[int, int]] = None  # (pivot_ply, var_id) 当前“录制中的变着”
+        
+        # 查看中的变着
         self._viewing_variation: Optional[Tuple[int, int]] = None  # (pivot_ply, var_id) 当前在主界面查看的变着（若有）
+        
+        # 应用到主线的变着
         self._applied_variation: Optional[Tuple[int, int]] = None  # (pivot_ply, var_id) 当前已经应用到主线的变着（若有）
 
         # 视图/交互状态
+        # 当前选中位置 & 合法目标
         self.selected_sq = None
+        
+        # 合法目标列表
         self.legal_targets = []
+        
+        # 棋盘偏移（用于拖拽）
         self.offset_x = 0
         self.offset_y = 0
 
-        # 当前注释/当前选择的半步
+        # 当前选中半步（用于注释面板同步）
         self._current_selected_ply: Optional[int] = None
 
-        # 子模块
+        # ===== 操作模块 =====
+        # 文件操作
         self.file_ops = FileOps(self)
+        
+        # 书签操作
         self.bm_ops = BookmarkOps(self)
+        
+        # 坐标转换工具
         self.transforms = Transforms(self)
 
         # ===== 布局：左棋盘 + 右综合面板 =====
@@ -613,6 +639,9 @@ class XiangqiGUI:
         self.moves_panel.refresh()
 
     def set_selection(self, sq):
+        """
+        设置选中位置，更新高亮，更新合法目标。
+        """
         self.selected_sq = sq
         if sq is None:
             self.legal_targets = []
@@ -886,12 +915,19 @@ class XiangqiGUI:
         - 若当前选择 ply 位于主线末尾 => 直接追加到主线
         - 否则 => 录入为“当前步+1”的变着（若已有录制中的变着，则追加到该变着）
         """
+
+        # 获取当前选择位置
         prev_sel = self._current_selected_ply
+
+        # 如果没有选择位置，设置为末尾
         if prev_sel is None:
             prev_sel = len(self._mainline_san_flat())
+
+        # 获取主线长度
         flat_len = len(self._mainline_san_flat())
 
         # 在末尾继续：主线追加
+        # prev_sel == flat_len 表示当前选择位置在主线末尾
         if prev_sel == flat_len:
             self.append_move_mainline(san)
             self._current_selected_ply = len(self.board.history)
@@ -902,29 +938,36 @@ class XiangqiGUI:
             self._building_var = None
             return
 
-        pivot = prev_sel + 1  # 变着从下一步开始
+        # 变着从下一步开始
+        pivot = prev_sel + 1
 
         # —— 非末尾：录为“变着” —— #
+        # 如果正在录制变着
         if self._building_var != None:
             # 继续向同一条变着追加
             cur_var = self.var_mgr.get(pivot, self._building_var[1])
+            # 如果找到变着
             if cur_var:
                 cur_var.san_moves.append(san)
-                # keep comments aligned
+                # 保持注释同步
                 cur_var.san_comments.append("")
         else:
+            # 如果没有正在录制的变着
             # 新建一条变着 (让 VariationManager 生成规范名称)
             var_id = self.var_mgr.add(pivot, [san], name=san)
+            # 设置正在录制的变着
             self._building_var = (pivot, var_id)
             # 更新右下变着列表（显示当前 pivot 的备选）
             self.refresh_variations_box(pivot_ply=pivot)
+            # 更新当前选择位置
             self._current_selected_ply = len(self.board.history)
+            # 更新棋盘选择
             self._select_moves_row_for_ply(self._current_selected_ply)
-            # 注意：主线不变，等待用户从变着列表中选择切换
+            # 标记棋谱已修改
             self.mark_dirty()
         
-        # keep pivot to start of variation
-        # pivot = pivot - len(self._building_var)-1        
+        # 保持 pivot 指向变着的起始位置
+        pivot = pivot - len(self._building_var)-1        
 
     # ================= 菜单委托 =================
     # 文件

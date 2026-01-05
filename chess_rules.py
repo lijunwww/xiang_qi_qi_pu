@@ -60,9 +60,14 @@ class Move:
         return f"Move({self.from_sq}->{self.to_sq})"
 
 class Board:
+    """象棋棋盘与规则实现，含长将/长捉及 60 回合无吃子判和。"""
     def __init__(self, startpos: bool = True):
+        # 基本属性保持不变
         self.board: List[List[Optional[Piece]]] = [[None for _ in range(COLS)] for _ in range(ROWS)]
+        
+        # 轮到哪方走子
         self.side_to_move: str = 'r'
+
         # 保持不变：history 仍是三元组 (move, captured_piece, prev_side)
         self.history: List[Tuple[Move, Optional[Piece], str]] = []
         # 新增：与 history 同步的元信息栈，不改变原 history 结构
@@ -75,6 +80,14 @@ class Board:
             self.set_start_position()
 
     def set_start_position(self):
+        """
+        Docstring for set_start_position
+        
+        :param self: Description
+        :return: Description
+        :rtype: List[Tuple[int, int]]
+
+        """
         self.board = [[None for _ in range(COLS)] for _ in range(ROWS)]
         # 黑方
         top = [('R',0),('N',1),('B',2),('A',3),('K',4),('A',5),('B',6),('N',7),('R',8)]
