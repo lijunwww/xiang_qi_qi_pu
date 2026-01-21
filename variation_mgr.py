@@ -62,16 +62,19 @@ class VariationManager:
         self._next_var_id += 1
         # compute hierarchical name if not provided
         if not name:
+            # it is a top-level variation
             if parent_id is None:
                 lst = self.variations.get(pivot_ply, [])
                 idx = len(lst) + 1
                 name = f"{pivot_ply}-{idx:02d}"
+            # it is a child variation
             else:
                 # try to locate parent's path to compute prefix
                 path_info = self._find_parent_path(parent_id)
+                # fallback to simple name if parent not found
                 if path_info is None:
-                    # fallback to simple name
                     name = san_seq[0] if san_seq else f"{pivot_ply}-01"
+                # it is a child variation
                 else:
                     top_ply, indices = path_info
                     # determine new child index among siblings under given pivot_index
@@ -134,14 +137,17 @@ class VariationManager:
             for key, lst in list(children_dict.items()):
                 before = len(lst)
                 children_dict[key] = [v for v in lst if v.var_id != var_id]
+                # if any child is removed, remove this node
                 if len(children_dict[key]) != before:
                     self._id_map.pop(var_id, None)
                     return True
+                # otherwise recursively remove in children
                 for v in children_dict[key]:
                     if _remove_in_children(v.children):
                         return True
             return False
 
+        # remove from children
         for p, lst in self.variations.items():
             for v in lst:
                 if _remove_in_children(v.children):
